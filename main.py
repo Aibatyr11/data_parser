@@ -92,6 +92,9 @@ def main():
         print(f"Создай папку '{DATA_FOLDER}'!")
         return
 
+    # Создаем пустой список для хранения названий файлов
+    processed_files = []
+
     for filename in os.listdir(DATA_FOLDER):
         file_path = os.path.join(DATA_FOLDER, filename)
         if not os.path.isfile(file_path) or filename.startswith('~'):
@@ -101,8 +104,19 @@ def main():
         
         if filename.endswith(('.xlsx', '.xls', '.csv')):
             parse_excel_csv(file_path, table_name)
+            processed_files.append(filename) # Добавляем имя файла в список
         elif filename.endswith('.docx'):
             parse_word(file_path, table_name)
+            processed_files.append(filename) # Добавляем имя файла в список
+
+    # Генерируем текстовый файл со списком всех датасетов
+    if processed_files:
+        with open("list_of_files.txt", "w", encoding="utf-8") as f:
+            f.write("Список загруженных файлов (датасетов):\n")
+            f.write("-" * 40 + "\n")
+            for name in set(processed_files): # set() уберет дубликаты, если они вдруг появятся
+                f.write(f"- {name}\n")
+        print("\n✅ Успешно сгенерирован файл 'list_of_files.txt' со списком файлов!")
 
     print("Все готово! Открой pgAdmin и проверь таблицы.")
 
