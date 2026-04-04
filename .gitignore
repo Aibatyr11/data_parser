@@ -1,2 +1,5 @@
 .env
 
+venv/
+files_to_parse/
+list_of_files.txt
