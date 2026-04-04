@@ -3,8 +3,11 @@ import re
 import pandas as pd
 import docx
 from sqlalchemy import create_engine
+from dotenv import load_dotenv
 
-DB_URL = "postgresql://postgres:123@127.0.0.1:5433/reports_db?client_encoding=utf8"
+load_dotenv()
+
+DB_URL = os.getenv("DB_URL")
 engine = create_engine(DB_URL)
 
 DATA_FOLDER = "files_to_parse"
