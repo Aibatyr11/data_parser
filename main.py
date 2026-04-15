@@ -128,7 +128,7 @@ def merge_split_tables():
             # Сохраняем в базу под общим именем
             merged_df.to_sql(base_name, engine, if_exists='replace', index=False)
             
-            report.append(f"✅ Создана единая таблица: '{base_name}'")
+            report.append(f"Создана единая таблица: '{base_name}'")
             report.append(f"   Объединено частей: {len(parts)} (от {parts[0]} до {parts[-1]})")
             report.append(f"   Всего строк: {len(merged_df)}\n")
             
