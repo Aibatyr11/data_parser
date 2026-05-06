@@ -47,7 +47,7 @@ class DatabaseManager:
 
         # ВАЖНО: Мы добавили parent_id в INSERT
         insert_query = """
-            INSERT INTO statistics_table 
+            INSERT INTO statistics_table
             (kato_id, region_name, period_code, period_name, value, parent_id)
             VALUES %s
         """
@@ -63,6 +63,30 @@ class DatabaseManager:
             raise
 
         return flat_data
+
+    def save_company_info(self, company_data: dict):
+        """Сохранение данных о компании из stat.gov.kz"""
+        if not company_data:
+            return
+
+        # Запрос с обновлением (ON CONFLICT), если такой БИН уже есть
+        insert_query = """
+            INSERT INTO companies_table (bin, name, oked, head_name, address)
+            VALUES (%(bin)s, %(name)s, %(oked)s, %(head_name)s, %(address)s)
+            ON CONFLICT (bin) DO UPDATE SET 
+                name = EXCLUDED.name,
+                oked = EXCLUDED.oked,
+                head_name = EXCLUDED.head_name,
+                address = EXCLUDED.address;
+        """
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(insert_query, company_data)
+            self.conn.commit()
+            logging.info(f"Сохранена компания: {company_data.get('bin')} - {company_data.get('name')}")
+        except Exception as e:
+            self.conn.rollback()
+            logging.error(f"Ошибка сохранения компании {company_data.get('bin')}: {e}")
 
     def close(self):
         if self.conn:

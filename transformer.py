@@ -7,6 +7,15 @@ class DataTransformer:
     """Трансформация с расчетом средних цен (Задача 2.4)."""
 
     @staticmethod
+    def calculate_economic_aggregate(base_val: float) -> float:
+        """
+        Место для реализации 'Формулы'. 
+        Например, очистка от выбросов, применение коэффициентов или индексов.
+        Базовый пример: увеличение на 5% и округление до 2 знаков.
+        """
+        return round(base_val * 1.05, 2)
+
+    @staticmethod
     def flatten_tree_data(raw_tree: List[Dict[str, Any]], date_list: List[str], period_names: List[str]) -> List[Dict[str, Any]]:
         flat_data = []
         logging.info(f"Начало трансформации. Всего узлов в дереве: {len(raw_tree)}")
@@ -26,10 +35,14 @@ class DataTransformer:
                         # Базовое значение (индекс)
                         # Используем strip(), чтобы пустые строки не ломали float
                         base_val = float(str(raw_value).strip()) if str(raw_value).strip() else None
-                        
-                        # --- РАСЧЕТ АГРЕГАТОВ (Формула Руслана) ---
-                        # По ТЗ 2.4 здесь внедряется расчет средних цен.
-                        final_value = base_val 
+
+                        # --- РАСЧЕТ АГРЕГАТОВ (Формула) ---
+                        # Вызываем метод агрегации, если базовое значение валидно
+                        if base_val is not None:
+                            final_value = DataTransformer.calculate_economic_aggregate(base_val)
+                        else:
+                            final_value = None
+                            
                     except (ValueError, TypeError):
                         final_value = None
 

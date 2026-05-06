@@ -1,183 +1,192 @@
 import os
 import re
 import pandas as pd
-import docx
-from sqlalchemy import create_engine, inspect, text
+import hashlib
+import pdfplumber
+from docx import Document
+from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 
 load_dotenv()
 
 DB_URL = os.getenv("DB_URL")
-engine = create_engine(DB_URL)
-
+engine = create_engine(DB_URL, pool_pre_ping=True, isolation_level="AUTOCOMMIT")
 DATA_FOLDER = "files_to_parse"
 
-def clean_table_name(filename):
-    name = os.path.splitext(filename)[0]
-    clean_name = re.sub(r'\W+', '_', name.lower()).strip('_')
-    return clean_name[:25].rstrip('_')
+def generate_first_last_name(base_name, logical_name):
+    """
+    Берет первое и последнее слово из имени файла + короткий хэш + имя таблицы (страницы).
+    """
+    short_hash = hashlib.md5(base_name.encode('utf-8')).hexdigest()[:4]
+    clean_base = re.sub(r'^[a-z0-9]{10,}_?', '', base_name.lower())
+    if not clean_base:
+        clean_base = base_name.lower()
 
-def fix_columns(df):
-    new_cols = []
-    seen = {}
-    for i, c in enumerate(df.columns):
-        c_str = str(c).strip()
+    words_base = re.findall(r'[a-zA-Zа-яА-ЯёЁ0-9]+', clean_base)
+    words_logical = re.findall(r'[a-zA-Zа-яА-ЯёЁ0-9]+', str(logical_name).lower())
 
-        if not c_str or c_str.lower() == 'nan' or 'unnamed' in c_str.lower():
-            c_str = f"колонка_{i+1}"
+    if len(words_base) > 1:
+        base_part = f"{words_base[0]}_{words_base[-1]}_{short_hash}"
+    elif len(words_base) == 1:
+        base_part = f"{words_base[0]}_{short_hash}"
+    else:
+        base_part = f"data_{short_hash}"
 
-        if c_str in seen:
-            seen[c_str] += 1
-            final_col = f"{c_str}_{seen[c_str]}"
-        else:
-            seen[c_str] = 0
-            final_col = c_str
+    logical_part = "_".join(words_logical)[:15].strip('_')
 
-        new_cols.append(final_col)
+    if logical_part and logical_part not in base_part:
+        full_name = f"{base_part}_{logical_part}"
+    else:
+        full_name = base_part
 
-    df.columns = new_cols
-    return df
+    if full_name and full_name[0].isdigit():
+        full_name = "t_" + full_name
 
-def parse_excel_csv(file_path, table_name):
+    encoded = full_name.encode('utf-8')
+    if len(encoded) > 63:
+        full_name = encoded[:63].decode('utf-8', 'ignore').rstrip('_')
+
+    return full_name
+
+def process_sheet_to_table(df, table_name, logical_name, original_file_name):
     try:
-        if file_path.endswith('.csv'):
-            df = pd.read_csv(file_path)
-        else:
-            df = pd.read_excel(file_path, skiprows=5)
+        df = df.fillna("")
+        df = df.astype(str)
 
-        df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
-        df = fix_columns(df)
+        for col in df.columns:
+            # Убираем системный мусор и переносы строк, которые часто бывают в PDF/Word
+            df[col] = df[col].str.replace(r'\n', ' ', regex=True)
+            df[col] = df[col].str.replace(r'^(nan|none|<na>|null)$', '', regex=True, flags=re.IGNORECASE)
+            df[col] = df[col].str.replace(r'(#REF!|#VALUE!|#ERROR!|#N/A)', '', regex=True, flags=re.IGNORECASE)
+            df[col] = df[col].str.replace(r'\.0$', '', regex=True)
+            df[col] = df[col].str.strip()
 
-        df.to_sql(table_name, engine, if_exists='replace', index=False)
-        print(f"Успех: {os.path.basename(file_path)} -> таблица '{table_name}' ({len(df)} строк)")
+        df = df[~df.replace("", pd.NA).isna().all(axis=1)]
+
+        if df.empty:
+            return False
+
+        new_columns = [f"col_{i+1}" for i in range(len(df.columns))]
+        df.columns = new_columns
+
+        with engine.connect() as conn:
+            conn.execute(text(f'DROP TABLE IF EXISTS "{table_name}"'))
+            df.to_sql(table_name, conn, if_exists='replace', index=False)
+
+            conn.execute(text('''
+                CREATE TABLE IF NOT EXISTS "_справочник_файлов" (
+                    имя_таблицы TEXT,
+                    оригинальный_файл TEXT,
+                    имя_листа TEXT
+                )
+            '''))
+            conn.execute(text(f"DELETE FROM \"_справочник_файлов\" WHERE имя_таблицы = '{table_name}'"))
+            query = text('INSERT INTO "_справочник_файлов" (имя_таблицы, оригинальный_файл, имя_листа) VALUES (:tbl, :file, :sheet)')
+            conn.execute(query, {"tbl": table_name, "file": original_file_name, "sheet": logical_name})
+
+        return True
 
     except Exception as e:
-        print(f"Ошибка с Excel файлом {os.path.basename(file_path)}:")
-        print(f"Детали: {str(e)[:150]}...")
+        print(f"❌ Ошибка при сохранении таблицы '{logical_name}': {e}")
+        return False
 
-def parse_word(file_path, base_table_name):
+def process_pdf_to_tables(file_path, base_name, original_file_name):
+    saved_tables = 0
     try:
-        doc = docx.Document(file_path)
-        tables = doc.tables
-
-        if not tables:
-            print(f"Пропуск: В файле {os.path.basename(file_path)} нет таблиц.")
-            return
-
-        for i, table in enumerate(tables):
-            data = []
-            keys = None
-
-            for j, row in enumerate(table.rows):
-                text_cells = [cell.text.strip() for cell in row.cells]
-
-                if j == 0:
-                    keys = text_cells
-                    continue
-
-                row_dict = dict(zip(keys, text_cells))
-                data.append(row_dict)
-
-            df = pd.DataFrame(data)
-            df = fix_columns(df)
-
-            table_name = base_table_name if len(tables) == 1 else f"{base_table_name}_part{i+1}"
-            df.to_sql(table_name, engine, if_exists='replace', index=False)
-            print(f"Успех: {os.path.basename(file_path)} (Таблица {i+1}) -> таблица '{table_name}' ({len(df)} строк)")
-
-    except Exception as e:
-        print(f"Ошибка с Word файлом {os.path.basename(file_path)}:")
-        print(f"Детали: {str(e)[:150]}...")
-
-def merge_split_tables():
-    print("\nНачинаем процесс объединения разделенных таблиц (part1, part2...)...")
-    inspector = inspect(engine)
-    tables = inspector.get_table_names()
-    
-    # Группируем таблицы по базовому имени
-    groups = {}
-    for t in tables:
-        match = re.search(r'^(.*)_part(\d+)$', t)
-        if match:
-            base = match.group(1)
-            if base not in groups:
-                groups[base] = []
-            groups[base].append(t)
-            
-    if not groups:
-        print("Таблиц для объединения не найдено.")
-        return
-
-    report = ["Отчет об объединении разбитых таблиц:\n" + "-"*50]
-    
-    for base_name, parts in groups.items():
-        # Сортируем части по номеру (чтобы part10 шла после part9, а не после part1)
-        parts.sort(key=lambda x: int(re.search(r'_part(\d+)$', x).group(1)))
-        
-        dfs = []
-        for p in parts:
-            try:
-                df = pd.read_sql_table(p, engine)
-                dfs.append(df)
-            except Exception as e:
-                print(f"Ошибка при чтении таблицы {p}: {e}")
-                
-        if dfs:
-            # Склеиваем все DataFrame'ы в один
-            merged_df = pd.concat(dfs, ignore_index=True)
-            # Сохраняем в базу под общим именем
-            merged_df.to_sql(base_name, engine, if_exists='replace', index=False)
-            
-            report.append(f"✅ Создана единая таблица: '{base_name}'")
-            report.append(f"   Объединено частей: {len(parts)} (от {parts[0]} до {parts[-1]})")
-            report.append(f"   Всего строк: {len(merged_df)}\n")
-            
-            # Удаляем старые куски из базы, чтобы не занимали место
-            with engine.begin() as conn:
-                for p in parts:
-                    conn.execute(text(f'DROP TABLE "{p}"'))
+        with pdfplumber.open(file_path) as pdf:
+            for i, page in enumerate(pdf.pages):
+                # Ищем таблицы на странице
+                tables = page.extract_tables()
+                for j, table in enumerate(tables):
+                    if not table:
+                        continue
                     
-    # Сохраняем отчет в текстовый файл
-    with open("merged_tables_report.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(report))
-    print(f"✅ Все части успешно объединены! Отчет сохранен в 'merged_tables_report.txt'")
+                    df = pd.DataFrame(table)
+                    logical_name = f"Стр_{i+1}_Табл_{j+1}"
+                    table_name = generate_first_last_name(base_name, logical_name)
+
+                    if process_sheet_to_table(df, table_name, logical_name, original_file_name):
+                        saved_tables += 1
+                        print(f"    ✔️ {logical_name} -> '{table_name}'")
+    except Exception as e:
+        print(f"❌ Ошибка чтения PDF {base_name}: {e}")
+    return saved_tables
+
+def process_docx_to_tables(file_path, base_name, original_file_name):
+    saved_tables = 0
+    try:
+        doc = Document(file_path)
+        for i, table in enumerate(doc.tables):
+            data = []
+            for row in table.rows:
+                row_data = [cell.text for cell in row.cells]
+                data.append(row_data)
+            
+            if not data:
+                continue
+                
+            df = pd.DataFrame(data)
+            logical_name = f"Word_Табл_{i+1}"
+            table_name = generate_first_last_name(base_name, logical_name)
+
+            if process_sheet_to_table(df, table_name, logical_name, original_file_name):
+                saved_tables += 1
+                print(f"    ✔️ {logical_name} -> '{table_name}'")
+    except Exception as e:
+        print(f"❌ Ошибка чтения DOCX {base_name}: {e}")
+    return saved_tables
 
 def main():
-    print("Начинаем парсинг файлов...")
+    print("🚀 СТАРТ: ПАРСИНГ ТАБЛИЦ ИЗ PDF И WORD")
     if not os.path.exists(DATA_FOLDER):
-        print(f"Создай папку '{DATA_FOLDER}'!")
+        print(f"❌ Папка {DATA_FOLDER} не найдена!")
         return
 
-    processed_files = []
+    # Оставляем пустым, чтобы парсить ВСЕ найденные pdf и docx.
 
-    for root, dirs, files in os.walk(DATA_FOLDER):
-        for filename in files:
-            file_path = os.path.join(root, filename)
 
-            if not os.path.isfile(file_path) or filename.startswith('~') or filename.startswith('.'):
-                continue
 
-            table_name = clean_table_name(filename)
+    target_keywords = [
+        "таблица в книжку по баллам бонитета",
+        "6 объекты питания ско",
+        "развит. туризма",
+        "автостанции"
+    ]
 
-            if filename.endswith(('.xlsx', '.xls', '.csv')):
-                parse_excel_csv(file_path, table_name)
-                processed_files.append(filename)
-            elif filename.endswith('.docx'):
-                parse_word(file_path, table_name)
-                processed_files.append(filename)
 
-    if processed_files:
-        with open("list_of_files.txt", "w", encoding="utf-8") as f:
-            f.write("Список загруженных файлов (датасетов):\n")
-            f.write("-" * 40 + "\n")
-            for name in set(processed_files):
-                f.write(f"- {name}\n")
-        print("\nУспешно сгенерирован файл 'list_of_files.txt' со списком файлов!")
-    else:
-        print("\nВ папке и подпапках не найдено ни одного Excel или Word файла.")
 
-    # ЗАПУСКАЕМ ОБЪЕДИНЕНИЕ ТАБЛИЦ СРАЗУ ПОСЛЕ ПАРСИНГА
-    merge_split_tables()
+    total_files_processed = 0
+    total_tables_created = 0
+
+    for root, _, files in os.walk(DATA_FOLDER):
+        for f in files:
+            f_lower = f.lower()
+            is_target = any(keyword in f_lower for keyword in target_keywords)
+
+            # Берем ТОЛЬКО pdf и docx
+            if is_target and f_lower.endswith(('.pdf', '.docx')) and not f.startswith('~$'):
+                file_path = os.path.join(root, f)
+                b_name = os.path.splitext(f)[0]
+
+                print(f"\n📂 НАЙДЕН ФАЙЛ: {f}")
+
+                tables_saved = 0
+                if f_lower.endswith('.pdf'):
+                    tables_saved = process_pdf_to_tables(file_path, b_name, f)
+                elif f_lower.endswith('.docx'):
+                    tables_saved = process_docx_to_tables(file_path, b_name, f)
+
+                if tables_saved > 0:
+                    total_files_processed += 1
+                    total_tables_created += tables_saved
+                else:
+                    print("  ⚠️ Таблицы не найдены или они пустые.")
+
+    print("\n" + "="*50)
+    print("🏁 ИТОГОВЫЙ ОТЧЕТ:")
+    print(f"   Обраработано файлов: {total_files_processed}")
+    print(f"   Извлечено таблиц:    {total_tables_created}")
+    print("="*50)
 
 if __name__ == "__main__":
     main()
