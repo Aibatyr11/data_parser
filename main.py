@@ -100,7 +100,7 @@ def process_pdf_to_tables(file_path, base_name, original_file_name):
                 for j, table in enumerate(tables):
                     if not table:
                         continue
-                    
+
                     df = pd.DataFrame(table)
                     logical_name = f"Стр_{i+1}_Табл_{j+1}"
                     table_name = generate_first_last_name(base_name, logical_name)
@@ -121,10 +121,10 @@ def process_docx_to_tables(file_path, base_name, original_file_name):
             for row in table.rows:
                 row_data = [cell.text for cell in row.cells]
                 data.append(row_data)
-            
+
             if not data:
                 continue
-                
+
             df = pd.DataFrame(data)
             logical_name = f"Word_Табл_{i+1}"
             table_name = generate_first_last_name(base_name, logical_name)
@@ -143,17 +143,12 @@ def main():
         return
 
     # Оставляем пустым, чтобы парсить ВСЕ найденные pdf и docx.
-
-
-
     target_keywords = [
         "таблица в книжку по баллам бонитета",
         "6 объекты питания ско",
         "развит. туризма",
         "автостанции"
     ]
-
-
 
     total_files_processed = 0
     total_tables_created = 0

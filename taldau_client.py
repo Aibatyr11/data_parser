@@ -58,12 +58,10 @@ class TaldauClient:
             return all_nodes
 
         for node in nodes:
-            all_nodes.append(node)
-            
-            # СТРОГО ПО ТЗ: Смотрим только на параметр leaf
+            all_nodes.append(node) 
+           
             is_leaf = str(node.get('leaf', 'true')).lower() == 'true'
-
-            # Если это не лист (есть дочерние регионы), идем глубже!
+    
             if not is_leaf:
                 child_id = str(node.get('id'))
                 logging.info(f"  --> Узел {node.get('text')} имеет дочерние регионы! Спускаемся в id: {child_id}...")
